@@ -30,6 +30,60 @@ CHROMA_PATH = os.path.join(BASE_DIR, "chroma")
 EMBEDDING_MODEL = "models/gemini-embedding-001"
 EVALUATOR_MODEL = "gemini-2.5-flash"
 
+
+# CHANGE: Added Multi-Subject Support
+DATA_PATH = os.path.join(BASE_DIR, "data")
+
+DEFAULT_SUBJECTS = {
+    "machine learning": "machine_learning.md",
+    "computer networks": "computer_networks.md",
+    "data structures and algorithms": "data_structures_and_algorithms.md",
+    "object oriented programming basics": "object_oriented_programming_basics.md",
+    "artificial intelligence": "artificial_intelligence.md",
+}
+
+SUBJECT_ALIASES = {
+    "ml": "machine learning",
+    "machine learning": "machine learning",
+    "machine_learning": "machine learning",
+    "cn": "computer networks",
+    "computer networks": "computer networks",
+    "computer_networks": "computer networks",
+    "dsa": "data structures and algorithms",
+    "data structures and algorithms": "data structures and algorithms",
+    "data_structures_and_algorithms": "data structures and algorithms",
+    "oops": "object oriented programming basics",
+    "oop": "object oriented programming basics",
+    "oops basics": "object oriented programming basics",
+    "object oriented programming basics": "object oriented programming basics",
+    "object_oriented_programming_basics": "object oriented programming basics",
+    "ai": "artificial intelligence",
+    "artificial intelligence": "artificial intelligence",
+    "artificial_intelligence": "artificial intelligence",
+}
+
+# helper function : Normalize Subjects
+def normalize_subject(subject: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9\s]+", " ", subject.lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+def get_subject_path(subject_input: str) -> tuple[str, str]:
+    normalized = normalize_subject(subject_input)
+    subject_key = SUBJECT_ALIASES.get(normalized, normalized)
+    filename = DEFAULT_SUBJECTS.get(subject_key)
+
+    if not filename:
+        raise ValueError("Unknown Subject")
+
+    subject_path = os.path.join(DATA_PATH, filename)
+    if not os.path.exists(subject_path):
+        raise FileNotFoundError(f"Missing subject file: {filename}")
+    return subject_key, subject_path
+    
+
+
+
+# SYSTEM INSTRUCTIONS
 SYSTEM_INSTRUCTION = """You are a strict evaluator for a quiz platform.
 
 Your job is to evaluate a student's answer to a question.
@@ -128,12 +182,15 @@ class ProgressInfo(BaseModel):
     remaining: int
 
 
+# CHANGE: add subject_key to keep track of the subject
 class StartInterviewRequest(BaseModel):
+    subject_key: str
     num_questions: int = 6
 
 
 class StartInterviewResponse(BaseModel):
     session_id: str
+    subject: str
     current_question: InterviewQuestion
     progress: ProgressInfo
 
@@ -184,6 +241,7 @@ class InterviewReportResponse(BaseModel):
 
 
 class SessionState(BaseModel):
+    subject: str
     used_question_ids: set[int] = Field(default_factory=set)
     current_question_id: int | None = None
     target_questions: int = 6
@@ -197,6 +255,9 @@ class AppState:
         self.global_questions: dict[int, dict[str, Any]] = {}
         self.question_ids: list[int] = []
         self.question_ids_by_text: dict[str, list[int]] = {}
+        self.questions_by_subject: dict[str, dict[int, dict[str, Any]]] = {}
+        self.question_ids_by_subject: dict[str, list[int]] = {}
+        self.question_ids_by_subject_and_text: dict[str, dict[str, list[int]]] = {}
         self.sessions: dict[str, SessionState] = {}
         self.lock = Lock()
         self.model: ChatGoogleGenerativeAI | None = None
@@ -215,6 +276,21 @@ def parse_chunk(chunk_text: str) -> tuple[str, str]:
     question = lines[0].replace("Q: ", "").strip()
     correct_answer = lines[1].replace("A: ", "").strip() if len(lines) > 1 else ""
     return question, correct_answer
+
+
+def subject_key_from_source(source: Any) -> str | None:
+    if not isinstance(source, str) or not source.strip():
+        return None
+
+    normalized_source = os.path.normpath(source)
+    source_name = os.path.basename(normalized_source)
+
+    for subject_key, filename in DEFAULT_SUBJECTS.items():
+        subject_path = os.path.normpath(os.path.join(DATA_PATH, filename))
+        if normalized_source == subject_path or source_name == filename:
+            return subject_key
+
+    return None
 
 
 def parse_json_from_llm(text: str) -> dict[str, Any]:
@@ -377,28 +453,59 @@ def progress_info(session: SessionState) -> ProgressInfo:
     return ProgressInfo(answered=answered, target=session.target_questions, remaining=remaining)
 
 
-def random_global_question(excluded: set[int]) -> dict[str, Any] | None:
-    available_ids = [qid for qid in state.question_ids if qid not in excluded]
+# CHANGE : Add Subject-Based Question
+
+# def random_global_question(excluded: set[int]) -> dict[str, Any] | None:
+#     available_ids = [qid for qid in state.question_ids if qid not in excluded]
+#     if not available_ids:
+#         return None
+#     chosen_id = random.choice(available_ids)
+#     return state.global_questions[chosen_id]
+
+def random_subject_question(subject_key, excluded: set[int]) -> dict[str, Any] | None:
+    subject_ids = state.question_ids_by_subject.get(subject_key, [])
+    available_ids = [qid for qid in subject_ids if qid not in excluded]
     if not available_ids:
         return None
     chosen_id = random.choice(available_ids)
     return state.global_questions[chosen_id]
 
 
-def similar_global_question(query_text: str, excluded: set[int]) -> dict[str, Any] | None:
+# CHANGE: Add Similar Subject-Based Question
+
+# def similar_global_question(query_text: str, excluded: set[int]) -> dict[str, Any] | None:
+#     if state.vector_store is None:
+#         return random_global_question(excluded)
+
+#     candidates = state.vector_store.similarity_search(query_text, k=10)
+#     for doc in candidates:
+#         q_text, _ = parse_chunk(doc.page_content)
+#         key = normalize_text(q_text)
+#         ids = state.question_ids_by_text.get(key, [])
+#         for qid in ids:
+#             if qid not in excluded:
+#                 return state.global_questions[qid]
+
+#     return random_global_question(excluded)
+
+def similar_subject_question(subject_key: str, query_text: str, exluded: set[int]) -> dict[str, Any] | None:
     if state.vector_store is None:
-        return random_global_question(excluded)
+        return random_subject_question(excluded)
 
     candidates = state.vector_store.similarity_search(query_text, k=10)
+    subject_text_index = state.question_ids_by_subject_and_text.get(subject_key, {})
     for doc in candidates:
+        doc_subject = subject_key_from_source(doc.metadata.get("source"))
+        if doc_subject != subject_key:
+            continue
         q_text, _ = parse_chunk(doc.page_content)
         key = normalize_text(q_text)
-        ids = state.question_ids_by_text.get(key, [])
+        
+        ids = subject_text_index.get(key, [])
         for qid in ids:
             if qid not in excluded:
                 return state.global_questions[qid]
-
-    return random_global_question(excluded)
+    return random_subject_question(subject_key, excluded)
 
 
 def weak_dimensions(evaluation: EvaluationResult) -> list[str]:
@@ -470,7 +577,7 @@ def next_question_for_session(session: SessionState, last_record: AnswerRecord |
         return None
 
     if last_record is None:
-        return random_global_question(session.used_question_ids)
+        return random_subject_question(session.subject, session.used_question_ids)
 
     asked_questions: list[str] = []
     for qid in session.used_question_ids:
@@ -500,7 +607,7 @@ def next_question_for_session(session: SessionState, last_record: AnswerRecord |
         return row
 
     query = f"{last_record.question}\nCandidate answer: {last_record.student_answer}"
-    return similar_global_question(query_text=query, excluded=session.used_question_ids)
+    return similar_subject_question(session.subject, query_text=query, excluded=session.used_question_ids)
 
 
 def build_report(session_id: str, session: SessionState) -> InterviewReportResponse:
@@ -576,6 +683,8 @@ def build_report(session_id: str, session: SessionState) -> InterviewReportRespo
     )
 
 
+# CHANGE: added subject-aware indexing on startup
+
 @app.on_event("startup")
 def startup() -> None:
     api_key = os.getenv("GOOGLE_API_KEY")
@@ -587,13 +696,24 @@ def startup() -> None:
 
     raw = vector_store.get()
     docs = raw.get("documents", [])
+    metadatas = raw.get("metadatas", [])
     if not docs:
         raise RuntimeError("No questions found in Chroma DB. Run make_db.py first.")
 
     global_questions: dict[int, dict[str, Any]] = {}
     question_ids_by_text: dict[str, list[int]] = {}
+    questions_by_subject: dict[str, dict[int, dict[str, Any]]] = {key: {} for key in DEFAULT_SUBJECTS}
+    question_ids_by_subject: dict[str, list[int]] = {key: [] for key in DEFAULT_SUBJECTS}
+    question_ids_by_subject_and_text: dict[str, dict[str, list[int]]] = {
+        key: {} for key in DEFAULT_SUBJECTS
+    }
 
     for idx, chunk in enumerate(docs):
+        metadata = metadatas[idx] if idx < len(metadatas) and isinstance(metadatas[idx], dict) else {}
+        subject_key = subject_key_from_source(metadata.get("source"))
+        if subject_key is None:
+            continue
+
         question, reference_answer = parse_chunk(chunk)
         row = {
             "id": idx,
@@ -601,14 +721,24 @@ def startup() -> None:
             "reference_answer": reference_answer,
             "generated": False,
             "focus": "core concept",
+            "subject": subject_key,
         }
         global_questions[idx] = row
         key = normalize_text(question)
         question_ids_by_text.setdefault(key, []).append(idx)
+        questions_by_subject[subject_key][idx] = row
+        question_ids_by_subject[subject_key].append(idx)
+        question_ids_by_subject_and_text[subject_key].setdefault(key, []).append(idx)
+
+    if not global_questions:
+        raise RuntimeError("No subject-tagged questions found in Chroma DB. Rebuild it with source metadata.")
 
     state.global_questions = global_questions
     state.question_ids = list(global_questions.keys())
     state.question_ids_by_text = question_ids_by_text
+    state.questions_by_subject = questions_by_subject
+    state.question_ids_by_subject = question_ids_by_subject
+    state.question_ids_by_subject_and_text = question_ids_by_subject_and_text
     state.vector_store = vector_store
     state.model = ChatGoogleGenerativeAI(
         model=EVALUATOR_MODEL,
@@ -617,20 +747,55 @@ def startup() -> None:
     )
 
 
+@app.get("/")
+def root() -> dict[str, str]:
+    return {"message": "Interview QnA Engine is running"}
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
 
 
+# CHANGE: adding Subject Wise QnA
+
+# @app.post("/interview/start", response_model=StartInterviewResponse)
+# def start_interview(payload: StartInterviewRequest) -> StartInterviewResponse:
+#     target = clamp_int(payload.num_questions, 1, 30, 6)
+#     first = random_global_question(set())
+#     if first is None:
+#         raise HTTPException(status_code=500, detail="Question bank is empty")
+
+#     session_id = str(uuid.uuid4())
+#     session = SessionState(target_questions=target)
+#     session.current_question_id = first["id"]
+#     session.used_question_ids.add(first["id"])
+
+#     with state.lock:
+#         state.sessions[session_id] = session
+
+#     return StartInterviewResponse(
+#         session_id=session_id,
+#         current_question=InterviewQuestion(
+#             question_id=first["id"],
+#             question=first["question"],
+#             generated=first.get("generated", False),
+#             focus=first.get("focus"),
+#         ),
+#         progress=progress_info(session),
+#     )
+
 @app.post("/interview/start", response_model=StartInterviewResponse)
 def start_interview(payload: StartInterviewRequest) -> StartInterviewResponse:
     target = clamp_int(payload.num_questions, 1, 30, 6)
-    first = random_global_question(set())
+    subject_key, _ = get_subject_path(payload.subject_key)
+    first = random_subject_question(subject_key, set())
+
     if first is None:
         raise HTTPException(status_code=500, detail="Question bank is empty")
 
     session_id = str(uuid.uuid4())
-    session = SessionState(target_questions=target)
+    session = SessionState(subject=subject_key, target_questions=target)
     session.current_question_id = first["id"]
     session.used_question_ids.add(first["id"])
 
@@ -639,6 +804,7 @@ def start_interview(payload: StartInterviewRequest) -> StartInterviewResponse:
 
     return StartInterviewResponse(
         session_id=session_id,
+        subject=subject_key,
         current_question=InterviewQuestion(
             question_id=first["id"],
             question=first["question"],
