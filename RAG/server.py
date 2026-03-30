@@ -517,7 +517,7 @@ def random_subject_question(subject_key, excluded: set[int]) -> dict[str, Any] |
 
 
 def similar_subject_question(
-    subject_key: str, query_text: str, exluded: set[int]
+    subject_key: str, query_text: str, excluded: set[int]
 ) -> dict[str, Any] | None:
     if state.vector_store is None:
         return random_subject_question(excluded)
