@@ -19,6 +19,15 @@ load_dotenv(os.path.join(BASE_DIR, ".env"))
 DATA_PATH = os.path.join(BASE_DIR, "data")
 CHROMA_PATH = os.path.join(BASE_DIR, "chroma")
 
+# CHANGE : add the subject file list used by the multi-subject server flow
+DEFAULT_SUBJECTS = {
+    "machine learning": "machine_learning.md",
+    "computer networks": "computer_networks.md",
+    "data structures and algorithms": "data_structures_and_algorithms.md",
+    "object oriented programming basics": "object_oriented_programming_basics.md",
+    "artificial intelligence": "artificial_intelligence.md",
+}
+
 
 # -------------------- Entry point --------------------
 def main():
@@ -39,11 +48,27 @@ def load_documents() -> list[Document]:
     """
     documents = []
 
-    for filename in os.listdir(DATA_PATH):
-        if not filename.endswith(".md"):
-            continue
+    # for filename in os.listdir(DATA_PATH):
+    #     if not filename.endswith(".md"):
+    #         continue
+    #
+    #     filepath = os.path.join(DATA_PATH, filename)
+    #     with open(filepath, "r", encoding="utf-8") as f:
+    #         text = f.read()
+    #
+    #     documents.append(
+    #         Document(
+    #             page_content=text,
+    #             metadata={"source": filepath},
+    #         )
+    #     )
 
+    # CHANGE : load only the subject markdown files expected by server.py
+    for filename in DEFAULT_SUBJECTS.values():
         filepath = os.path.join(DATA_PATH, filename)
+        if not os.path.exists(filepath):
+            raise FileNotFoundError(f"Missing subject file: {filename}")
+
         with open(filepath, "r", encoding="utf-8") as f:
             text = f.read()
 
@@ -135,7 +160,14 @@ def save_to_chroma(chunks: list[Document]) -> None:
         google_api_key=api_key,
     )
 
-    db = Chroma.from_documents(
+    # db = Chroma.from_documents(
+    #     documents=chunks,
+    #     embedding=embeddings,
+    #     persist_directory=CHROMA_PATH,
+    # )
+
+    # CHANGE : persist the filtered subject-aware chunks to Chroma
+    Chroma.from_documents(
         documents=chunks,
         embedding=embeddings,
         persist_directory=CHROMA_PATH,
